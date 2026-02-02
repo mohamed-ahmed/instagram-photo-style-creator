@@ -27,11 +27,59 @@ async function loadTokens() {
   try {
     if (await fs.pathExists(TOKENS_FILE)) {
       instagramTokens = JSON.parse(await fs.readFile(TOKENS_FILE, 'utf-8'));
+      
+      // Auto-refresh if token expires within 7 days
+      if (instagramTokens && instagramTokens.expiresAt && instagramTokens.accessToken) {
+        const expiresAt = new Date(instagramTokens.expiresAt);
+        const daysUntilExpiry = (expiresAt - Date.now()) / (1000 * 60 * 60 * 24);
+        
+        if (daysUntilExpiry < 7 && daysUntilExpiry > 0) {
+          console.log(`Token expires in ${Math.round(daysUntilExpiry)} days - auto-refreshing...`);
+          await autoRefreshToken();
+        } else if (daysUntilExpiry <= 0) {
+          console.log('Token has expired. Please refresh manually.');
+        }
+      }
     }
   } catch (e) {
+    console.error('Error loading tokens:', e.message);
     instagramTokens = null;
   }
 }
+
+// Auto-refresh long-lived token
+async function autoRefreshToken() {
+  try {
+    if (!instagramTokens?.accessToken || !FB_APP_ID || !FB_APP_SECRET) {
+      return;
+    }
+    
+    // Refresh the long-lived token
+    const refreshUrl = `https://graph.facebook.com/v18.0/oauth/access_token?` +
+      `grant_type=fb_exchange_token` +
+      `&client_id=${FB_APP_ID}` +
+      `&client_secret=${FB_APP_SECRET}` +
+      `&fb_exchange_token=${instagramTokens.accessToken}`;
+    
+    const response = await fetch(refreshUrl);
+    const data = await response.json();
+    
+    if (data.error) {
+      console.error('Auto-refresh failed:', data.error.message);
+      return;
+    }
+    
+    // Update token with new expiry
+    instagramTokens.accessToken = data.access_token;
+    instagramTokens.expiresAt = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString();
+    
+    await saveTokens(instagramTokens);
+    console.log('✓ Token auto-refreshed! New expiry:', instagramTokens.expiresAt);
+  } catch (error) {
+    console.error('Auto-refresh error:', error.message);
+  }
+}
+
 loadTokens();
 
 async function saveTokens(tokens) {
@@ -55,6 +103,78 @@ function getInstagramCreds() {
     username: 'silkpath.co'
   };
 }
+
+/**
+ * Exchange short-lived token for long-lived token and get Page Access Token
+ */
+async function refreshInstagramToken(shortLivedToken) {
+  try {
+    // Step 1: Exchange for long-lived user token (60 days)
+    const longTokenUrl = `https://graph.facebook.com/v18.0/oauth/access_token?` +
+      `grant_type=fb_exchange_token` +
+      `&client_id=${FB_APP_ID}` +
+      `&client_secret=${FB_APP_SECRET}` +
+      `&fb_exchange_token=${shortLivedToken}`;
+    
+    const longTokenResponse = await fetch(longTokenUrl);
+    const longTokenData = await longTokenResponse.json();
+    
+    if (longTokenData.error) {
+      throw new Error(longTokenData.error.message);
+    }
+    
+    const longLivedUserToken = longTokenData.access_token;
+    console.log('Got long-lived user token (60 days)');
+    
+    // Step 2: Get Page Access Token for SilkPath (page ID: 1022163574308658)
+    const pageTokenUrl = `https://graph.facebook.com/v18.0/1022163574308658?fields=access_token,instagram_business_account{id,username}&access_token=${longLivedUserToken}`;
+    
+    const pageResponse = await fetch(pageTokenUrl);
+    const pageData = await pageResponse.json();
+    
+    if (pageData.error) {
+      throw new Error(pageData.error.message);
+    }
+    
+    const pageAccessToken = pageData.access_token;
+    const instagramAccount = pageData.instagram_business_account;
+    
+    console.log('Got Page Access Token for SilkPath');
+    console.log('Instagram account:', instagramAccount?.username || instagramAccount?.id);
+    
+    // Save tokens
+    const tokens = {
+      accessToken: pageAccessToken,
+      userId: instagramAccount?.id || '17841472995664251',
+      username: instagramAccount?.username || 'silkpath.co',
+      pageId: '1022163574308658',
+      expiresAt: new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString() // ~60 days
+    };
+    
+    await saveTokens(tokens);
+    
+    return tokens;
+  } catch (error) {
+    console.error('Token refresh error:', error.message);
+    throw error;
+  }
+}
+
+// API endpoint to refresh token
+app.post('/api/refresh-token', async (req, res) => {
+  const { token } = req.body;
+  
+  if (!token) {
+    return res.status(400).json({ error: 'Token is required' });
+  }
+  
+  try {
+    const tokens = await refreshInstagramToken(token);
+    res.json({ success: true, username: tokens.username, expiresAt: tokens.expiresAt });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Serve static files from output folder
 app.use('/images', express.static(OUTPUT_DIR));
@@ -243,6 +363,8 @@ async function postToInstagram(imageUrl, caption) {
     throw new Error('Instagram not connected. Click "Connect Instagram" to authenticate.');
   }
   
+  console.log('Posting to Instagram:', imageUrl);
+  
   // Step 1: Create media container
   const createMediaUrl = `https://graph.facebook.com/v18.0/${creds.userId}/media`;
   const createResponse = await fetch(createMediaUrl, {
@@ -256,6 +378,7 @@ async function postToInstagram(imageUrl, caption) {
   });
   
   const createData = await createResponse.json();
+  console.log('Create container response:', createData);
   
   if (createData.error) {
     throw new Error(createData.error.message);
@@ -263,7 +386,41 @@ async function postToInstagram(imageUrl, caption) {
   
   const creationId = createData.id;
   
-  // Step 2: Publish the media
+  // Step 2: Wait for container to be ready (poll status)
+  let status = 'IN_PROGRESS';
+  let attempts = 0;
+  const maxAttempts = 30; // Max 30 seconds
+  
+  while (status === 'IN_PROGRESS' && attempts < maxAttempts) {
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+    
+    const statusUrl = `https://graph.facebook.com/v18.0/${creationId}?fields=status_code,status&access_token=${creds.accessToken}`;
+    const statusResponse = await fetch(statusUrl);
+    const statusData = await statusResponse.json();
+    
+    console.log('Container status:', statusData);
+    
+    if (statusData.status_code) {
+      status = statusData.status_code;
+    } else if (statusData.status) {
+      status = statusData.status;
+    } else {
+      // No status field means it's ready
+      status = 'FINISHED';
+    }
+    
+    attempts++;
+  }
+  
+  if (status === 'ERROR') {
+    throw new Error('Instagram failed to process the image');
+  }
+  
+  if (status === 'IN_PROGRESS') {
+    throw new Error('Instagram is taking too long to process the image');
+  }
+  
+  // Step 3: Publish the media
   const publishUrl = `https://graph.facebook.com/v18.0/${creds.userId}/media_publish`;
   const publishResponse = await fetch(publishUrl, {
     method: 'POST',
@@ -275,6 +432,7 @@ async function postToInstagram(imageUrl, caption) {
   });
   
   const publishData = await publishResponse.json();
+  console.log('Publish response:', publishData);
   
   if (publishData.error) {
     throw new Error(publishData.error.message);
@@ -498,7 +656,17 @@ app.get('/', async (req, res) => {
     
     .card:hover { transform: translateY(-4px); box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
     
+    .card-image-wrapper { position: relative; }
     .card-image { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+    .card-overlay { position: absolute; top: 0.5rem; right: 0.5rem; display: flex; gap: 0.5rem; opacity: 0; transition: opacity 0.2s; }
+    .card:hover .card-overlay { opacity: 1; }
+    .btn-heart, .btn-delete { width: 40px; height: 40px; border-radius: 50%; border: none; cursor: pointer; font-size: 1.2rem; display: flex; align-items: center; justify-content: center; transition: transform 0.2s; }
+    .btn-heart { background: rgba(255,255,255,0.9); }
+    .btn-heart:hover { transform: scale(1.1); }
+    .btn-heart.active { background: rgba(255,200,200,0.95); }
+    .btn-delete { background: rgba(255,255,255,0.9); }
+    .btn-delete:hover { transform: scale(1.1); background: rgba(255,200,200,0.95); }
+    .fav-badge { background: transparent; color: #ff4444; }
     .card-content { padding: 1.5rem; }
     .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
     .hijab-style { font-family: 'Cormorant Garamond', serif; font-size: 1.4rem; color: var(--accent); text-transform: capitalize; }
@@ -536,6 +704,19 @@ app.get('/', async (req, res) => {
     
     .btn-download { background: var(--border); color: var(--text-primary); text-decoration: none; }
     .btn-download:hover { background: #3a3a3a; }
+    
+    .btn-refresh { background: var(--bg-card); color: var(--accent); border: 1px solid var(--accent); padding: 0.5rem 1rem; font-size: 0.7rem; border-radius: 4px; cursor: pointer; font-family: 'Montserrat', sans-serif; }
+    .btn-refresh:hover { background: var(--accent); color: var(--bg-primary); }
+    
+    .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; justify-content: center; align-items: center; }
+    .modal.show { display: flex; }
+    .modal-content { background: var(--bg-card); padding: 2rem; border-radius: 12px; max-width: 600px; width: 90%; }
+    .modal-content h3 { color: var(--accent); margin-bottom: 1rem; font-family: 'Cormorant Garamond', serif; }
+    .modal-content p { color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1rem; }
+    .modal-content input { width: 100%; padding: 0.8rem; background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 0.85rem; margin-bottom: 1rem; }
+    .modal-content .btn-row { display: flex; gap: 1rem; justify-content: flex-end; }
+    .modal-content .btn-cancel { background: var(--border); color: var(--text-primary); }
+    .modal-content .btn-submit { background: var(--accent); color: var(--bg-primary); }
     
     .btn-instagram { background: var(--instagram); color: white; }
     .btn-instagram:hover { background: var(--instagram-hover); }
@@ -594,11 +775,18 @@ app.get('/', async (req, res) => {
     ${creds.accessToken && creds.userId ? `
       <div class="ig-status connected" style="margin-top: 1rem;">
         ✓ Connected as @${creds.username || 'instagram'}
+        ${instagramTokens?.expiresAt ? ` <span style="opacity: 0.6; font-size: 0.7rem;">(expires ${new Date(instagramTokens.expiresAt).toLocaleDateString()})</span>` : ''}
       </div>
+      <button class="btn-refresh" onclick="showRefreshModal()" style="margin-top: 0.5rem;">
+        🔄 Refresh Token
+      </button>
     ` : `
       <p style="margin-top: 1rem; color: var(--error); font-size: 0.85rem;">
-        ⚠ Add INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_USER_ID to .env
+        ⚠ Token expired or not set
       </p>
+      <button class="btn-refresh" onclick="showRefreshModal()" style="margin-top: 0.5rem;">
+        🔑 Set Access Token
+      </button>
     `}
     
     <div class="stats">
@@ -613,6 +801,10 @@ app.get('/', async (req, res) => {
       <div class="stat">
         <div class="stat-value">${galleryData.images.filter(i => i.postedToInstagram).length}</div>
         <div class="stat-label">Posted to IG</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value">${galleryData.images.filter(i => i.favorited).length}</div>
+        <div class="stat-label">Favorites</div>
       </div>
     </div>
   </header>
@@ -644,11 +836,22 @@ app.get('/', async (req, res) => {
       </div>
     ` : galleryData.images.map(img => `
       <div class="card" data-id="${img.id}">
-        <img class="card-image" src="/images/${img.filename}" alt="${img.hijabStyle} hijab style" loading="lazy">
+        <div class="card-image-wrapper">
+          <img class="card-image" src="/images/${img.filename}" alt="${img.hijabStyle} hijab style" loading="lazy">
+          <div class="card-overlay">
+            <button class="btn-heart ${img.favorited ? 'active' : ''}" onclick="toggleFavorite(this, ${img.id})">
+              ${img.favorited ? '❤️' : '🤍'}
+            </button>
+            <button class="btn-delete" onclick="deleteImage(this, ${img.id})">
+              🗑️
+            </button>
+          </div>
+        </div>
         <div class="card-content">
           <div class="card-header">
             <span class="hijab-style">${img.hijabStyle.replace(/_/g, ' ')}</span>
             <div class="badges">
+              ${img.favorited ? '<span class="fav-badge">❤️</span>' : ''}
               <span class="provider-badge">${img.provider || 'openai'}</span>
               ${img.postedToInstagram ? '<span class="posted-badge">Posted</span>' : ''}
             </div>
@@ -671,7 +874,106 @@ app.get('/', async (req, res) => {
     `).join('')}
   </main>
   
+  <!-- Token Refresh Modal -->
+  <div id="refreshModal" class="modal">
+    <div class="modal-content">
+      <h3>🔑 Refresh Instagram Token</h3>
+      <p>1. Go to <a href="https://developers.facebook.com/tools/explorer" target="_blank" style="color: var(--accent);">Graph API Explorer</a></p>
+      <p>2. Select "Auto Posting" app, then "User or Page" → "SilkPath"</p>
+      <p>3. Copy the Access Token and paste below:</p>
+      <input type="text" id="newToken" placeholder="Paste your access token here...">
+      <div class="btn-row">
+        <button class="btn btn-cancel" onclick="hideRefreshModal()">Cancel</button>
+        <button class="btn btn-submit" onclick="submitToken()">Save Token</button>
+      </div>
+    </div>
+  </div>
+
   <script>
+    function showRefreshModal() {
+      document.getElementById('refreshModal').classList.add('show');
+    }
+    
+    function hideRefreshModal() {
+      document.getElementById('refreshModal').classList.remove('show');
+      document.getElementById('newToken').value = '';
+    }
+    
+    async function submitToken() {
+      const token = document.getElementById('newToken').value.trim();
+      if (!token) {
+        showToast('Please paste a token', 'error');
+        return;
+      }
+      
+      try {
+        const response = await fetch('/api/refresh-token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token })
+        });
+        
+        const data = await response.json();
+        
+        if (data.error) {
+          throw new Error(data.error);
+        }
+        
+        showToast('Token refreshed! Connected as @' + data.username, 'success');
+        hideRefreshModal();
+        setTimeout(() => location.reload(), 1500);
+      } catch (error) {
+        showToast('Error: ' + error.message, 'error');
+      }
+    }
+    
+    async function toggleFavorite(btn, imageId) {
+      try {
+        const response = await fetch('/api/favorite/' + imageId, { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.error) throw new Error(data.error);
+        
+        btn.innerHTML = data.favorited ? '❤️' : '🤍';
+        btn.classList.toggle('active', data.favorited);
+        
+        // Update badge
+        const card = btn.closest('.card');
+        const badges = card.querySelector('.badges');
+        const favBadge = badges.querySelector('.fav-badge');
+        
+        if (data.favorited && !favBadge) {
+          badges.insertAdjacentHTML('afterbegin', '<span class="fav-badge">❤️</span>');
+        } else if (!data.favorited && favBadge) {
+          favBadge.remove();
+        }
+        
+        showToast(data.favorited ? 'Added to favorites!' : 'Removed from favorites');
+      } catch (error) {
+        showToast('Error: ' + error.message, 'error');
+      }
+    }
+    
+    async function deleteImage(btn, imageId) {
+      if (!confirm('Delete this image? This cannot be undone.')) return;
+      
+      try {
+        const response = await fetch('/api/image/' + imageId, { method: 'DELETE' });
+        const data = await response.json();
+        
+        if (data.error) throw new Error(data.error);
+        
+        const card = btn.closest('.card');
+        card.style.transform = 'scale(0)';
+        card.style.opacity = '0';
+        setTimeout(() => card.remove(), 300);
+        
+        showToast('Image deleted');
+      } catch (error) {
+        showToast('Error: ' + error.message, 'error');
+      }
+    }
+    
     function showToast(message, type = 'success') {
       const toast = document.createElement('div');
       toast.className = 'toast ' + type;
@@ -766,6 +1068,58 @@ function escapeForJs(text) {
     .replace(/`/g, '\\`')
     .replace(/\$/g, '\\$');
 }
+
+// API endpoint to toggle favorite
+app.post('/api/favorite/:id', async (req, res) => {
+  try {
+    const imageId = parseInt(req.params.id);
+    const galleryPath = path.join(OUTPUT_DIR, 'gallery.json');
+    const data = await fs.readFile(galleryPath, 'utf-8');
+    const galleryData = JSON.parse(data);
+    
+    const image = galleryData.images.find(img => img.id === imageId);
+    if (image) {
+      image.favorited = !image.favorited;
+      await fs.writeFile(galleryPath, JSON.stringify(galleryData, null, 2));
+      res.json({ success: true, favorited: image.favorited });
+    } else {
+      res.status(404).json({ error: 'Image not found' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API endpoint to delete image
+app.delete('/api/image/:id', async (req, res) => {
+  try {
+    const imageId = parseInt(req.params.id);
+    const galleryPath = path.join(OUTPUT_DIR, 'gallery.json');
+    const data = await fs.readFile(galleryPath, 'utf-8');
+    const galleryData = JSON.parse(data);
+    
+    const imageIndex = galleryData.images.findIndex(img => img.id === imageId);
+    if (imageIndex === -1) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+    
+    const image = galleryData.images[imageIndex];
+    
+    // Delete the actual file
+    const imagePath = path.join(OUTPUT_DIR, image.filename);
+    if (await fs.pathExists(imagePath)) {
+      await fs.remove(imagePath);
+    }
+    
+    // Remove from gallery
+    galleryData.images.splice(imageIndex, 1);
+    await fs.writeFile(galleryPath, JSON.stringify(galleryData, null, 2));
+    
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // API endpoint to get gallery data as JSON
 app.get('/api/gallery', async (req, res) => {

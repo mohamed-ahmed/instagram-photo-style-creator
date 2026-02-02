@@ -237,7 +237,8 @@ async function generateImage(styleImages, hijabImage) {
  * Generate Instagram caption for an image using Gemini
  */
 async function generateCaption(imagePath, hijabName) {
-  console.log('Generating Instagram caption for ' + hijabName + '...');
+  const displayName = hijabName.replace(/_/g, ' ');
+  console.log('Generating Instagram caption for ' + displayName + '...');
   
   try {
     const imageBuffer = await fs.readFile(imagePath);
@@ -251,7 +252,7 @@ async function generateCaption(imagePath, hijabName) {
           role: 'user',
           parts: [
             {
-              text: 'Create an engaging Instagram caption for this hijab fashion photo. The hijab style is called "' + hijabName + '". Include relevant hashtags. Keep it elegant, inspiring, and suitable for a fashion/lifestyle account. Output ONLY the caption text, nothing else.'
+              text: 'Create an engaging Instagram caption for this hijab fashion photo. The hijab style is called "' + displayName + '". Include relevant hashtags. Keep it elegant, inspiring, and suitable for a fashion/lifestyle account. Output ONLY the caption text, nothing else.'
             },
             {
               inlineData: {
@@ -278,7 +279,7 @@ async function generateCaption(imagePath, hijabName) {
     return 'Beautiful hijab style. #hijabfashion #modestfashion';
   } catch (error) {
     console.error('Error generating caption:', error.message);
-    return 'Elegant hijab fashion. #hijabstyle #modestfashion #' + hijabName.replace(/_/g, '');
+    return 'Elegant ' + displayName + ' hijab fashion. #hijabstyle #modestfashion #' + hijabName.replace(/_/g, '');
   }
 }
 
@@ -308,7 +309,27 @@ async function saveGalleryData(galleryData) {
 }
 
 /**
+ * Detect image format from buffer magic bytes
+ */
+function detectImageFormat(buffer) {
+  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+    return 'jpg';
+  }
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47) {
+    return 'png';
+  }
+  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46) {
+    return 'gif';
+  }
+  if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46) {
+    return 'webp';
+  }
+  return 'png'; // default
+}
+
+/**
  * Save image (from URL or base64 data) to output folder
+ * Returns the actual file extension used
  */
 async function saveImage(imageData, outputPath) {
   try {
@@ -328,8 +349,21 @@ async function saveImage(imageData, outputPath) {
       buffer = Buffer.from(arrayBuffer);
     }
     
-    await fs.writeFile(outputPath, buffer);
-    console.log('Saved image to: ' + outputPath);
+    // Detect actual format and fix extension if needed
+    const actualFormat = detectImageFormat(buffer);
+    const currentExt = path.extname(outputPath).toLowerCase().replace('.', '');
+    
+    let finalPath = outputPath;
+    if (actualFormat !== currentExt && actualFormat !== 'png') {
+      // Replace extension with the actual format
+      finalPath = outputPath.replace(/\.[^.]+$/, '.' + actualFormat);
+      console.log('Detected ' + actualFormat.toUpperCase() + ' format, saving as: ' + path.basename(finalPath));
+    }
+    
+    await fs.writeFile(finalPath, buffer);
+    console.log('Saved image to: ' + finalPath);
+    
+    return path.basename(finalPath); // Return the actual filename
   } catch (error) {
     console.error('Error saving image to ' + outputPath + ':', error.message);
     throw error;
@@ -397,20 +431,21 @@ async function main() {
         
         // Create output filename
         const timestamp = Date.now();
-        const outputFilename = hijabImage.name + '_' + timestamp + '.png';
-        const outputPath = path.join(OUTPUT_DIR, outputFilename);
+        const tempFilename = hijabImage.name + '_' + timestamp + '.png';
+        const tempPath = path.join(OUTPUT_DIR, tempFilename);
         
-        // Save the image
-        await saveImage(imageData, outputPath);
+        // Save the image (returns actual filename with correct extension)
+        const actualFilename = await saveImage(imageData, tempPath);
+        const actualPath = path.join(OUTPUT_DIR, actualFilename);
         
         // Generate caption for the image
-        const caption = await generateCaption(outputPath, hijabImage.name);
+        const caption = await generateCaption(actualPath, hijabImage.name);
         console.log('Caption: ' + caption.substring(0, 100) + '...');
         
         // Add to gallery data
         galleryData.images.push({
           id: timestamp,
-          filename: outputFilename,
+          filename: actualFilename,
           hijabStyle: hijabImage.name,
           caption: caption,
           createdAt: new Date().toISOString(),
