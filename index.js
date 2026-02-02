@@ -234,6 +234,80 @@ async function generateImage(styleImages, hijabImage) {
 }
 
 /**
+ * Generate Instagram caption for an image using Gemini
+ */
+async function generateCaption(imagePath, hijabName) {
+  console.log('Generating Instagram caption for ' + hijabName + '...');
+  
+  try {
+    const imageBuffer = await fs.readFile(imagePath);
+    const imageBase64 = imageBuffer.toString('base64');
+    const mimeType = getMimeType(imagePath);
+    
+    const response = await gemini.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              text: 'Create an engaging Instagram caption for this hijab fashion photo. The hijab style is called "' + hijabName + '". Include relevant hashtags. Keep it elegant, inspiring, and suitable for a fashion/lifestyle account. Output ONLY the caption text, nothing else.'
+            },
+            {
+              inlineData: {
+                mimeType: mimeType,
+                data: imageBase64
+              }
+            }
+          ]
+        }
+      ]
+    });
+    
+    if (response.candidates && response.candidates.length > 0) {
+      const candidate = response.candidates[0];
+      if (candidate.content && candidate.content.parts) {
+        for (const part of candidate.content.parts) {
+          if (part.text) {
+            return part.text.trim();
+          }
+        }
+      }
+    }
+    
+    return 'Beautiful hijab style. #hijabfashion #modestfashion';
+  } catch (error) {
+    console.error('Error generating caption:', error.message);
+    return 'Elegant hijab fashion. #hijabstyle #modestfashion #' + hijabName.replace(/_/g, '');
+  }
+}
+
+/**
+ * Load existing gallery data
+ */
+async function loadGalleryData() {
+  const galleryPath = path.join(OUTPUT_DIR, 'gallery.json');
+  try {
+    if (await fs.pathExists(galleryPath)) {
+      const data = await fs.readFile(galleryPath, 'utf-8');
+      return JSON.parse(data);
+    }
+  } catch (error) {
+    console.log('No existing gallery data found, starting fresh');
+  }
+  return { images: [] };
+}
+
+/**
+ * Save gallery data
+ */
+async function saveGalleryData(galleryData) {
+  const galleryPath = path.join(OUTPUT_DIR, 'gallery.json');
+  await fs.writeFile(galleryPath, JSON.stringify(galleryData, null, 2));
+  console.log('Gallery data saved to ' + galleryPath);
+}
+
+/**
  * Save image (from URL or base64 data) to output folder
  */
 async function saveImage(imageData, outputPath) {
@@ -313,6 +387,9 @@ async function main() {
     
     console.log('Found ' + hijabImages.length + ' hijab images');
     
+    // Load existing gallery data
+    const galleryData = await loadGalleryData();
+    
     // Generate images for each hijab style
     for (const hijabImage of hijabImages) {
       try {
@@ -325,6 +402,23 @@ async function main() {
         
         // Save the image
         await saveImage(imageData, outputPath);
+        
+        // Generate caption for the image
+        const caption = await generateCaption(outputPath, hijabImage.name);
+        console.log('Caption: ' + caption.substring(0, 100) + '...');
+        
+        // Add to gallery data
+        galleryData.images.push({
+          id: timestamp,
+          filename: outputFilename,
+          hijabStyle: hijabImage.name,
+          caption: caption,
+          createdAt: new Date().toISOString(),
+          provider: IMAGE_PROVIDER
+        });
+        
+        // Save gallery data after each image
+        await saveGalleryData(galleryData);
         
         // Add a small delay to avoid rate limiting
         await new Promise(resolve => setTimeout(resolve, 1000));
