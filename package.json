@@ -1,0 +1,28 @@
+{
+  "name": "instagram-photo-style-creator",
+  "version": "1.0.0",
+  "description": "AI-powered service to create Instagram-style photos with hijab clothing",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "setup": "node setup.js"
+  },
+  "keywords": [
+    "ai",
+    "image-generation",
+    "instagram",
+    "style-transfer"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@google/genai": "^1.39.0",
+    "dotenv": "^16.3.1",
+    "form-data": "^4.0.0",
+    "fs-extra": "^11.1.1",
+    "node-fetch": "^2.7.0",
+    "openai": "^4.20.0"
+  }
+}

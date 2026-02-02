@@ -1,0 +1,7 @@
+node_modules/
+.env
+output_folder/
+style_input/
+hijab_input/
+*.log
+.DS_Store
