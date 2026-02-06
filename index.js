@@ -10,9 +10,46 @@ dotenv.config();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Get provider from environment or default to 'openai'
-// Options: 'openai' or 'gemini'
-const IMAGE_PROVIDER = process.env.IMAGE_PROVIDER || 'openai';
+// Parse command line arguments
+// Usage: node index.js [--hijab <folder>] [--provider <openai|gemini>]
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const result = {
+    hijabFolder: null,
+    provider: 'gemini', // default to gemini
+    amazon: false
+  };
+  
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--hijab' && args[i + 1]) {
+      result.hijabFolder = args[i + 1];
+      i++;
+    } else if (args[i] === '--provider' && args[i + 1]) {
+      result.provider = args[i + 1];
+      i++;
+    } else if (args[i] === '--amazon') {
+      result.amazon = true;
+    } else if (!args[i].startsWith('--')) {
+      // First non-flag argument is hijab folder (shorthand)
+      result.hijabFolder = args[i];
+    }
+  }
+  
+  // Fall back to environment variables if not set via CLI
+  if (!result.hijabFolder && process.env.HIJAB_FOLDER) {
+    result.hijabFolder = process.env.HIJAB_FOLDER;
+  }
+  if (process.env.IMAGE_PROVIDER && !process.argv.includes('--provider')) {
+    result.provider = process.env.IMAGE_PROVIDER;
+  }
+  
+  return result;
+}
+
+const CLI_ARGS = parseArgs();
+const IMAGE_PROVIDER = CLI_ARGS.provider;
+const HIJAB_FOLDER = CLI_ARGS.hijabFolder;
+const AMAZON_MODE = CLI_ARGS.amazon;
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -47,6 +84,8 @@ function getRandomItems(array, count) {
 
 /**
  * Get hijab images from hijab_input subdirectories
+ * If HIJAB_FOLDER is set, only use that specific folder
+ * Otherwise, randomly pick one folder
  */
 async function getHijabImages() {
   const hijabImages = [];
@@ -57,21 +96,50 @@ async function getHijabImages() {
     return hijabImages;
   }
   
-  const subdirs = await fs.readdir(HIJAB_INPUT_DIR);
+  let subdirs = await fs.readdir(HIJAB_INPUT_DIR);
   
+  // Filter out hidden files/folders
+  subdirs = subdirs.filter(s => !s.startsWith('.'));
+  
+  // Get only directories
+  const validDirs = [];
   for (const subdir of subdirs) {
     const subdirPath = path.join(HIJAB_INPUT_DIR, subdir);
     const stat = await fs.stat(subdirPath);
-    
     if (stat.isDirectory()) {
-      const images = await getImageFiles(subdirPath);
-      for (const image of images) {
-        hijabImages.push({
-          name: subdir,
-          path: path.join(subdirPath, image),
-        });
-      }
+      validDirs.push(subdir);
     }
+  }
+  
+  if (validDirs.length === 0) {
+    console.warn('No hijab folders found in ' + HIJAB_INPUT_DIR);
+    return hijabImages;
+  }
+  
+  let selectedFolder;
+  
+  // Filter to specific folder if HIJAB_FOLDER is set
+  if (HIJAB_FOLDER) {
+    if (validDirs.includes(HIJAB_FOLDER)) {
+      selectedFolder = HIJAB_FOLDER;
+      console.log('Using specific hijab folder: ' + selectedFolder);
+    } else {
+      console.error('Error: Hijab folder "' + HIJAB_FOLDER + '" not found. Available folders:', validDirs);
+      return hijabImages;
+    }
+  } else {
+    // Randomly pick one folder
+    selectedFolder = validDirs[Math.floor(Math.random() * validDirs.length)];
+    console.log('Randomly selected hijab folder: ' + selectedFolder);
+  }
+  
+  const selectedPath = path.join(HIJAB_INPUT_DIR, selectedFolder);
+  const images = await getImageFiles(selectedPath);
+  for (const image of images) {
+    hijabImages.push({
+      name: selectedFolder,
+      path: path.join(selectedPath, image),
+    });
   }
   
   return hijabImages;
@@ -103,7 +171,14 @@ async function generateImageOpenAI(styleImages, hijabImage) {
   console.log('Generating image with OpenAI gpt-image-1: ' + hijabName + '...');
   console.log('Using ' + styleImages.length + ' style images as reference');
   
-  const prompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing the hijab from the last image.';
+  const defaultPrompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing the hijab from the last image. Remove hijab wrinkles.';
+  const amazonPrompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing only the hijab from the last image. Remove hijab wrinkles. Model must not be sitting. Background must be completely white. Outfit must not include black';
+  //const amazonPrompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a photo matching the style and outfit from the reference images, with the model wearing the hijab from the last image. Remove hijab wrinkles. Model must be posing seductively like reference photos. Image background must be completely white';
+  
+  const prompt = AMAZON_MODE ? amazonPrompt : defaultPrompt;
+  if (AMAZON_MODE) {
+    console.log('Using Amazon product photo mode');
+  }
   
   try {
     // Create file objects for all style images
@@ -158,12 +233,18 @@ async function generateImageGemini(styleImages, hijabImage) {
   console.log('Generating image with Gemini gemini-3-pro-image-preview: ' + hijabName + '...');
   console.log('Using ' + styleImages.length + ' style images as reference');
   
+  if (AMAZON_MODE) {
+    console.log('Using Amazon product photo mode');
+  }
+  
   try {
     // Build parts array with all style images
     const parts = [];
     
     // Add prompt first
-    const prompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing the hijab from the last image.';
+    const defaultPrompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing the hijab from the last image.';
+    const amazonPrompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional portrait matching the style from the reference images, with the model wearing the hijab from the last image. Remove hijab wrinkles. Model must be standing and must be completely white background for amazon product photo';
+    const prompt = AMAZON_MODE ? amazonPrompt : defaultPrompt;
     parts.push({ text: prompt });
     
     // Add all style images
@@ -374,6 +455,26 @@ async function saveImage(imageData, outputPath) {
  * Main function to process images
  */
 async function main() {
+  // Show help if requested
+  if (process.argv.includes('--help') || process.argv.includes('-h')) {
+    console.log(`
+Usage: node index.js [options] [hijab_folder]
+
+Options:
+  --hijab <folder>     Specify hijab folder (e.g., Tanjiro_Anime_Print)
+  --provider <name>    Image provider: gemini (default) or openai
+  --amazon             Use Amazon product photo style (white background, standing model)
+  --help, -h           Show this help message
+
+Examples:
+  node index.js Tanjiro_Anime_Print
+  node index.js --hijab mint_green --provider gemini
+  node index.js --provider gemini   # Random hijab folder
+  node index.js --amazon            # Amazon product photo mode
+    `);
+    process.exit(0);
+  }
+  
   try {
     // Ensure directories exist
     await fs.ensureDir(STYLE_INPUT_DIR);

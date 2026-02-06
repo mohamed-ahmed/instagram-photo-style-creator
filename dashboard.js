@@ -682,7 +682,13 @@ app.get('/', async (req, res) => {
     .provider-badge { background: var(--border); color: var(--text-secondary); }
     .posted-badge { background: var(--success); color: white; }
     
-    .caption { font-size: 0.9rem; color: var(--text-secondary); line-height: 1.7; margin-bottom: 1rem; }
+    .caption-wrapper { margin-bottom: 1rem; }
+    .caption { font-size: 0.9rem; color: var(--text-secondary); line-height: 1.7; margin-bottom: 0.5rem; }
+    .caption-edit { width: 100%; min-height: 100px; padding: 0.8rem; background: var(--bg-primary); border: 1px solid var(--accent); border-radius: 6px; color: var(--text-primary); font-size: 0.85rem; font-family: 'Montserrat', sans-serif; resize: vertical; margin-bottom: 0.5rem; }
+    .btn-edit-caption, .btn-save-caption { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); padding: 0.3rem 0.6rem; font-size: 0.7rem; border-radius: 4px; cursor: pointer; margin-right: 0.5rem; }
+    .btn-edit-caption:hover { border-color: var(--accent); color: var(--accent); }
+    .btn-save-caption { border-color: var(--success); color: var(--success); }
+    .btn-save-caption:hover { background: var(--success); color: white; }
     
     .card-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
     
@@ -856,7 +862,12 @@ app.get('/', async (req, res) => {
               ${img.postedToInstagram ? '<span class="posted-badge">Posted</span>' : ''}
             </div>
           </div>
-          <p class="caption">${escapeHtml(img.caption)}</p>
+          <div class="caption-wrapper">
+            <p class="caption" id="caption-${img.id}">${escapeHtml(img.caption)}</p>
+            <textarea class="caption-edit" id="caption-edit-${img.id}" style="display:none;">${escapeHtml(img.caption)}</textarea>
+            <button class="btn-edit-caption" onclick="toggleEditCaption(${img.id})">✏️ Edit</button>
+            <button class="btn-save-caption" id="save-btn-${img.id}" onclick="saveCaption(${img.id})" style="display:none;">💾 Save</button>
+          </div>
           <div class="card-actions">
             <button class="btn btn-copy" onclick="copyCaption(this, \`${escapeForJs(img.caption)}\`)">
               Copy Caption
@@ -922,6 +933,61 @@ app.get('/', async (req, res) => {
         showToast('Token refreshed! Connected as @' + data.username, 'success');
         hideRefreshModal();
         setTimeout(() => location.reload(), 1500);
+      } catch (error) {
+        showToast('Error: ' + error.message, 'error');
+      }
+    }
+    
+    function toggleEditCaption(imageId) {
+      const captionP = document.getElementById('caption-' + imageId);
+      const captionEdit = document.getElementById('caption-edit-' + imageId);
+      const saveBtn = document.getElementById('save-btn-' + imageId);
+      const editBtn = captionP.parentElement.querySelector('.btn-edit-caption');
+      
+      if (captionEdit.style.display === 'none') {
+        // Show edit mode
+        captionP.style.display = 'none';
+        captionEdit.style.display = 'block';
+        saveBtn.style.display = 'inline-block';
+        editBtn.textContent = '❌ Cancel';
+        captionEdit.focus();
+      } else {
+        // Hide edit mode
+        captionP.style.display = 'block';
+        captionEdit.style.display = 'none';
+        saveBtn.style.display = 'none';
+        editBtn.textContent = '✏️ Edit';
+        // Reset to original value
+        captionEdit.value = captionP.textContent;
+      }
+    }
+    
+    async function saveCaption(imageId) {
+      const captionEdit = document.getElementById('caption-edit-' + imageId);
+      const caption = captionEdit.value.trim();
+      
+      if (!caption) {
+        showToast('Caption cannot be empty', 'error');
+        return;
+      }
+      
+      try {
+        const response = await fetch('/api/caption/' + imageId, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ caption })
+        });
+        
+        const data = await response.json();
+        
+        if (data.error) throw new Error(data.error);
+        
+        // Update UI
+        const captionP = document.getElementById('caption-' + imageId);
+        captionP.textContent = caption;
+        toggleEditCaption(imageId); // Close edit mode
+        
+        showToast('Caption saved!', 'success');
       } catch (error) {
         showToast('Error: ' + error.message, 'error');
       }
@@ -1068,6 +1134,33 @@ function escapeForJs(text) {
     .replace(/`/g, '\\`')
     .replace(/\$/g, '\\$');
 }
+
+// API endpoint to update caption
+app.put('/api/caption/:id', async (req, res) => {
+  try {
+    const imageId = parseInt(req.params.id);
+    const { caption } = req.body;
+    
+    if (!caption) {
+      return res.status(400).json({ error: 'Caption is required' });
+    }
+    
+    const galleryPath = path.join(OUTPUT_DIR, 'gallery.json');
+    const data = await fs.readFile(galleryPath, 'utf-8');
+    const galleryData = JSON.parse(data);
+    
+    const image = galleryData.images.find(img => img.id === imageId);
+    if (image) {
+      image.caption = caption;
+      await fs.writeFile(galleryPath, JSON.stringify(galleryData, null, 2));
+      res.json({ success: true, caption: image.caption });
+    } else {
+      res.status(404).json({ error: 'Image not found' });
+    }
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // API endpoint to toggle favorite
 app.post('/api/favorite/:id', async (req, res) => {
