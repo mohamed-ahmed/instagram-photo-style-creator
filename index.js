@@ -17,7 +17,8 @@ function parseArgs() {
   const result = {
     hijabFolder: null,
     provider: 'gemini', // default to gemini
-    amazon: false
+    amazon: false,
+    color: null
   };
   
   for (let i = 0; i < args.length; i++) {
@@ -29,6 +30,9 @@ function parseArgs() {
       i++;
     } else if (args[i] === '--amazon') {
       result.amazon = true;
+    } else if (args[i] === '--color' && args[i + 1]) {
+      result.color = args[i + 1];
+      i++;
     } else if (!args[i].startsWith('--')) {
       // First non-flag argument is hijab folder (shorthand)
       result.hijabFolder = args[i];
@@ -50,6 +54,7 @@ const CLI_ARGS = parseArgs();
 const IMAGE_PROVIDER = CLI_ARGS.provider;
 const HIJAB_FOLDER = CLI_ARGS.hijabFolder;
 const AMAZON_MODE = CLI_ARGS.amazon;
+const HIJAB_COLOR = CLI_ARGS.color;
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -162,22 +167,40 @@ function getMimeType(filePath) {
 }
 
 /**
+ * Build prompt based on mode (color vs hijab image, amazon vs default)
+ */
+function buildPrompt(styleImageCount) {
+  let defaultPrompt, amazonPrompt;
+  
+  if (HIJAB_COLOR) {
+    // Color-based prompts
+    defaultPrompt = 'Use the ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). Create a professional Instagram portrait matching the style from the reference images, with the model wearing a hijab in ' + HIJAB_COLOR + ' color. Remove hijab wrinkles.';
+    amazonPrompt = 'Use the ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). Create a professional Instagram portrait matching the style from the reference images, with the model wearing only a hijab in ' + HIJAB_COLOR + ' color. Remove hijab wrinkles. Model must not be sitting. Background must be completely white. Outfit must not include black';
+  } else {
+    // Hijab image-based prompts
+    defaultPrompt = 'Use the first ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing the hijab from the last image. Remove hijab wrinkles.';
+    amazonPrompt = 'Use the first ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing only the hijab from the last image. Remove hijab wrinkles. Model must not be sitting. Background must be completely white. Outfit must not include black';
+  }
+  
+  return AMAZON_MODE ? amazonPrompt : defaultPrompt;
+}
+
+/**
  * Generate image using OpenAI gpt-image-1 Images Edit API
- * Uses all style images plus the hijab image
+ * Uses all style images plus the hijab image (or color if specified)
  */
 async function generateImageOpenAI(styleImages, hijabImage) {
-  const hijabName = hijabImage.name;
+  const hijabName = hijabImage ? hijabImage.name : HIJAB_COLOR;
   
   console.log('Generating image with OpenAI gpt-image-1: ' + hijabName + '...');
   console.log('Using ' + styleImages.length + ' style images as reference');
   
-  const defaultPrompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing the hijab from the last image. Remove hijab wrinkles.';
-  const amazonPrompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing only the hijab from the last image. Remove hijab wrinkles. Model must not be sitting. Background must be completely white. Outfit must not include black';
-  //const amazonPrompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a photo matching the style and outfit from the reference images, with the model wearing the hijab from the last image. Remove hijab wrinkles. Model must be posing seductively like reference photos. Image background must be completely white';
-  
-  const prompt = AMAZON_MODE ? amazonPrompt : defaultPrompt;
+  const prompt = buildPrompt(styleImages.length);
   if (AMAZON_MODE) {
     console.log('Using Amazon product photo mode');
+  }
+  if (HIJAB_COLOR) {
+    console.log('Using hijab color: ' + HIJAB_COLOR);
   }
   
   try {
@@ -193,13 +216,15 @@ async function generateImageOpenAI(styleImages, hijabImage) {
       imageFiles.push(file);
     }
     
-    // Add hijab image last
-    const hijabImageBuffer = await fs.readFile(hijabImage.path);
-    const hijabFileName = path.basename(hijabImage.path);
-    const hijabFile = await OpenAI.toFile(hijabImageBuffer, hijabFileName, {
-      type: getMimeType(hijabImage.path)
-    });
-    imageFiles.push(hijabFile);
+    // Add hijab image last (only if not using color mode)
+    if (!HIJAB_COLOR && hijabImage) {
+      const hijabImageBuffer = await fs.readFile(hijabImage.path);
+      const hijabFileName = path.basename(hijabImage.path);
+      const hijabFile = await OpenAI.toFile(hijabImageBuffer, hijabFileName, {
+        type: getMimeType(hijabImage.path)
+      });
+      imageFiles.push(hijabFile);
+    }
     
     const response = await openai.images.edit({
       model: 'gpt-image-1',
@@ -225,10 +250,10 @@ async function generateImageOpenAI(styleImages, hijabImage) {
 
 /**
  * Generate image using Google Gemini
- * Uses all style images plus the hijab image
+ * Uses all style images plus the hijab image (or color if specified)
  */
 async function generateImageGemini(styleImages, hijabImage) {
-  const hijabName = hijabImage.name;
+  const hijabName = hijabImage ? hijabImage.name : HIJAB_COLOR;
   
   console.log('Generating image with Gemini gemini-3-pro-image-preview: ' + hijabName + '...');
   console.log('Using ' + styleImages.length + ' style images as reference');
@@ -236,15 +261,16 @@ async function generateImageGemini(styleImages, hijabImage) {
   if (AMAZON_MODE) {
     console.log('Using Amazon product photo mode');
   }
+  if (HIJAB_COLOR) {
+    console.log('Using hijab color: ' + HIJAB_COLOR);
+  }
   
   try {
     // Build parts array with all style images
     const parts = [];
     
     // Add prompt first
-    const defaultPrompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing the hijab from the last image.';
-    const amazonPrompt = 'Use the first ' + styleImages.length + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional portrait matching the style from the reference images, with the model wearing the hijab from the last image. Remove hijab wrinkles. Model must be standing and must be completely white background for amazon product photo';
-    const prompt = AMAZON_MODE ? amazonPrompt : defaultPrompt;
+    const prompt = buildPrompt(styleImages.length);
     parts.push({ text: prompt });
     
     // Add all style images
@@ -260,16 +286,18 @@ async function generateImageGemini(styleImages, hijabImage) {
       });
     }
     
-    // Add hijab image last
-    const hijabImageBuffer = await fs.readFile(hijabImage.path);
-    const hijabImageBase64 = hijabImageBuffer.toString('base64');
-    const hijabMimeType = getMimeType(hijabImage.path);
-    parts.push({
-      inlineData: {
-        mimeType: hijabMimeType,
-        data: hijabImageBase64
-      }
-    });
+    // Add hijab image last (only if not using color mode)
+    if (!HIJAB_COLOR && hijabImage) {
+      const hijabImageBuffer = await fs.readFile(hijabImage.path);
+      const hijabImageBase64 = hijabImageBuffer.toString('base64');
+      const hijabMimeType = getMimeType(hijabImage.path);
+      parts.push({
+        inlineData: {
+          mimeType: hijabMimeType,
+          data: hijabImageBase64
+        }
+      });
+    }
     
     const response = await gemini.models.generateContent({
       model: 'gemini-3-pro-image-preview',
@@ -462,15 +490,17 @@ Usage: node index.js [options] [hijab_folder]
 
 Options:
   --hijab <folder>     Specify hijab folder (e.g., Tanjiro_Anime_Print)
-  --provider <name>    Image provider: gemini (default) or openai
-  --amazon             Use Amazon product photo style (white background, standing model)
-  --help, -h           Show this help message
+  --color <color>     Specify hijab color instead of folder (e.g., "black", "lime green")
+  --provider <name>   Image provider: gemini (default) or openai
+  --amazon            Use Amazon product photo style (white background, standing model)
+  --help, -h          Show this help message
 
 Examples:
   node index.js Tanjiro_Anime_Print
   node index.js --hijab mint_green --provider gemini
-  node index.js --provider gemini   # Random hijab folder
-  node index.js --amazon            # Amazon product photo mode
+  node index.js --provider gemini              # Random hijab folder
+  node index.js --color "lime green"           # Generate with lime green hijab
+  node index.js --color black --amazon         # Black hijab, Amazon style
     `);
     process.exit(0);
   }
@@ -513,26 +543,21 @@ Examples:
     
     console.log('Selected ' + selectedStyleImages.length + ' style images:', selectedStyleImages);
     
-    // Get hijab images
-    const hijabImages = await getHijabImages();
-    
-    if (hijabImages.length === 0) {
-      throw new Error('No hijab images found in ' + HIJAB_INPUT_DIR + ' subdirectories');
-    }
-    
-    console.log('Found ' + hijabImages.length + ' hijab images');
-    
     // Load existing gallery data
     const galleryData = await loadGalleryData();
     
-    // Generate images for each hijab style
-    for (const hijabImage of hijabImages) {
+    // Handle color mode vs hijab folder mode
+    if (HIJAB_COLOR) {
+      // Color mode: generate single image with specified color
+      console.log('Using hijab color mode: ' + HIJAB_COLOR);
+      
       try {
-        const imageData = await generateImage(styleImagePaths, hijabImage);
+        const imageData = await generateImage(styleImagePaths, null);
         
         // Create output filename
         const timestamp = Date.now();
-        const tempFilename = hijabImage.name + '_' + timestamp + '.png';
+        const colorName = HIJAB_COLOR.replace(/\s+/g, '_').toLowerCase();
+        const tempFilename = colorName + '_' + timestamp + '.png';
         const tempPath = path.join(OUTPUT_DIR, tempFilename);
         
         // Save the image (returns actual filename with correct extension)
@@ -540,27 +565,72 @@ Examples:
         const actualPath = path.join(OUTPUT_DIR, actualFilename);
         
         // Generate caption for the image
-        const caption = await generateCaption(actualPath, hijabImage.name);
+        const caption = await generateCaption(actualPath, HIJAB_COLOR);
         console.log('Caption: ' + caption.substring(0, 100) + '...');
         
         // Add to gallery data
         galleryData.images.push({
           id: timestamp,
           filename: actualFilename,
-          hijabStyle: hijabImage.name,
+          hijabStyle: HIJAB_COLOR,
           caption: caption,
           createdAt: new Date().toISOString(),
           provider: IMAGE_PROVIDER
         });
         
-        // Save gallery data after each image
+        // Save gallery data
         await saveGalleryData(galleryData);
-        
-        // Add a small delay to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, 1000));
       } catch (error) {
-        console.error('Failed to process hijab image ' + hijabImage.name + ':', error.message);
-        // Continue with next image
+        console.error('Failed to generate image with color ' + HIJAB_COLOR + ':', error.message);
+        throw error;
+      }
+    } else {
+      // Hijab folder mode: get hijab images from folders
+      const hijabImages = await getHijabImages();
+      
+      if (hijabImages.length === 0) {
+        throw new Error('No hijab images found in ' + HIJAB_INPUT_DIR + ' subdirectories');
+      }
+      
+      console.log('Found ' + hijabImages.length + ' hijab images');
+      
+      // Generate images for each hijab style
+      for (const hijabImage of hijabImages) {
+        try {
+          const imageData = await generateImage(styleImagePaths, hijabImage);
+          
+          // Create output filename
+          const timestamp = Date.now();
+          const tempFilename = hijabImage.name + '_' + timestamp + '.png';
+          const tempPath = path.join(OUTPUT_DIR, tempFilename);
+          
+          // Save the image (returns actual filename with correct extension)
+          const actualFilename = await saveImage(imageData, tempPath);
+          const actualPath = path.join(OUTPUT_DIR, actualFilename);
+          
+          // Generate caption for the image
+          const caption = await generateCaption(actualPath, hijabImage.name);
+          console.log('Caption: ' + caption.substring(0, 100) + '...');
+          
+          // Add to gallery data
+          galleryData.images.push({
+            id: timestamp,
+            filename: actualFilename,
+            hijabStyle: hijabImage.name,
+            caption: caption,
+            createdAt: new Date().toISOString(),
+            provider: IMAGE_PROVIDER
+          });
+          
+          // Save gallery data after each image
+          await saveGalleryData(galleryData);
+          
+          // Add a small delay to avoid rate limiting
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        } catch (error) {
+          console.error('Failed to process hijab image ' + hijabImage.name + ':', error.message);
+          // Continue with next image
+        }
       }
     }
     

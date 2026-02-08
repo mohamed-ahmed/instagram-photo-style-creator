@@ -519,6 +519,9 @@ app.get('/', async (req, res) => {
     // Sort by newest first
     galleryData.images.sort((a, b) => b.id - a.id);
     
+    // Get unique hijab styles for filter
+    const uniqueStyles = [...new Set(galleryData.images.map(img => img.hijabStyle))].sort();
+    
     const creds = getInstagramCreds();
     const instagramConnected = !!(creds.accessToken && creds.userId);
     const canPost = instagramConnected && !!PUBLIC_URL;
@@ -734,6 +737,67 @@ app.get('/', async (req, res) => {
     .empty-state { text-align: center; padding: 6rem 2rem; color: var(--text-secondary); }
     .empty-state h2 { font-family: 'Cormorant Garamond', serif; font-size: 2rem; color: var(--text-primary); margin-bottom: 1rem; }
     
+    .filters {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 2rem;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border);
+    }
+    .filters-title {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 1.5rem;
+      color: var(--accent);
+      margin-bottom: 1rem;
+    }
+    .filters-container {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      align-items: center;
+    }
+    .filter-group {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .filter-checkbox {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      cursor: pointer;
+      padding: 0.5rem 1rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      transition: all 0.2s;
+    }
+    .filter-checkbox:hover {
+      border-color: var(--accent);
+      background: var(--bg-primary);
+    }
+    .filter-checkbox input[type="checkbox"] {
+      width: 18px;
+      height: 18px;
+      cursor: pointer;
+      accent-color: var(--accent);
+    }
+    .filter-checkbox label {
+      cursor: pointer;
+      font-size: 0.85rem;
+      color: var(--text-primary);
+      text-transform: capitalize;
+      user-select: none;
+    }
+    .filter-checkbox.show-all {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .filter-checkbox.show-all label {
+      color: var(--bg-primary);
+      font-weight: 500;
+    }
+    
     .toast {
       position: fixed;
       bottom: 2rem;
@@ -833,6 +897,24 @@ app.get('/', async (req, res) => {
   </div>
   ` : ''}
   
+  ${uniqueStyles.length > 0 ? `
+  <div class="filters">
+    <h3 class="filters-title">Filter by Hijab Style</h3>
+    <div class="filters-container">
+      <div class="filter-checkbox show-all">
+        <input type="checkbox" id="filter-show-all" checked onchange="toggleShowAll()">
+        <label for="filter-show-all">Show All</label>
+      </div>
+      ${uniqueStyles.map(style => `
+        <div class="filter-checkbox">
+          <input type="checkbox" id="filter-${style.replace(/[^a-zA-Z0-9]/g, '-')}" class="style-filter" value="${escapeHtml(style)}" checked onchange="updateFilters()">
+          <label for="filter-${style.replace(/[^a-zA-Z0-9]/g, '-')}">${escapeHtml(style.replace(/_/g, ' '))}</label>
+        </div>
+      `).join('')}
+    </div>
+  </div>
+  ` : ''}
+  
   <main class="gallery">
     ${galleryData.images.length === 0 ? `
       <div class="empty-state" style="grid-column: 1 / -1;">
@@ -841,7 +923,7 @@ app.get('/', async (req, res) => {
         <p style="margin-top: 1rem;"><code>IMAGE_PROVIDER=gemini npm start</code></p>
       </div>
     ` : galleryData.images.map(img => `
-      <div class="card" data-id="${img.id}">
+      <div class="card" data-id="${img.id}" data-hijab-style="${escapeHtml(img.hijabStyle)}">
         <div class="card-image-wrapper">
           <img class="card-image" src="/images/${img.filename}" alt="${img.hijabStyle} hijab style" loading="lazy">
           <div class="card-overlay">
@@ -901,6 +983,45 @@ app.get('/', async (req, res) => {
   </div>
 
   <script>
+    function toggleShowAll() {
+      const showAllCheckbox = document.getElementById('filter-show-all');
+      const styleFilters = document.querySelectorAll('.style-filter');
+      
+      styleFilters.forEach(filter => {
+        filter.checked = showAllCheckbox.checked;
+      });
+      
+      updateFilters();
+    }
+    
+    function updateFilters() {
+      const showAllCheckbox = document.getElementById('filter-show-all');
+      if (!showAllCheckbox) return; // Filters section might not exist if no images
+      
+      const styleFilters = document.querySelectorAll('.style-filter');
+      const selectedStyles = Array.from(styleFilters)
+        .filter(cb => cb.checked)
+        .map(cb => cb.value);
+      
+      // Update "Show All" checkbox state
+      if (styleFilters.length > 0) {
+        showAllCheckbox.checked = selectedStyles.length === styleFilters.length;
+      }
+      
+      // Filter cards
+      const cards = document.querySelectorAll('.card');
+      let visibleCount = 0;
+      cards.forEach(card => {
+        const cardStyle = card.getAttribute('data-hijab-style');
+        if (selectedStyles.length === 0 || selectedStyles.includes(cardStyle)) {
+          card.style.display = '';
+          visibleCount++;
+        } else {
+          card.style.display = 'none';
+        }
+      });
+    }
+    
     function showRefreshModal() {
       document.getElementById('refreshModal').classList.add('show');
     }
