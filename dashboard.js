@@ -1,6 +1,7 @@
 import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { execFile } from 'child_process';
 import fs from 'fs-extra';
 import dotenv from 'dotenv';
 
@@ -525,6 +526,7 @@ app.get('/', async (req, res) => {
     const creds = getInstagramCreds();
     const instagramConnected = !!(creds.accessToken && creds.userId);
     const canPost = instagramConnected && !!PUBLIC_URL;
+    const isMac = process.platform === 'darwin';
     
     console.log('Instagram status:', { connected: instagramConnected, canPost, hasToken: !!creds.accessToken, hasUserId: !!creds.userId });
     
@@ -713,6 +715,10 @@ app.get('/', async (req, res) => {
     
     .btn-download { background: var(--border); color: var(--text-primary); text-decoration: none; }
     .btn-download:hover { background: #3a3a3a; }
+    
+    .btn-finder { background: var(--border); color: var(--text-primary); }
+    .btn-finder:hover { background: #3a3a3a; }
+    .btn-finder:disabled { opacity: 0.6; cursor: not-allowed; }
     
     .btn-refresh { background: var(--bg-card); color: var(--accent); border: 1px solid var(--accent); padding: 0.5rem 1rem; font-size: 0.7rem; border-radius: 4px; cursor: pointer; font-family: 'Montserrat', sans-serif; }
     .btn-refresh:hover { background: var(--accent); color: var(--bg-primary); }
@@ -957,6 +963,7 @@ app.get('/', async (req, res) => {
             <a class="btn btn-download" href="/images/${img.filename}" download="${img.filename}">
               ↓ Download
             </a>
+            ${isMac ? `<button class="btn btn-finder" onclick="revealInFinder(this, ${img.id})" title="Reveal in Finder">📂 Finder</button>` : ''}
             <button class="btn btn-instagram" onclick="postToInstagram(this, ${img.id}, '${img.filename}', \`${escapeForJs(img.caption)}\`)">
               Post to IG
             </button>
@@ -1218,6 +1225,27 @@ app.get('/', async (req, res) => {
       }
     }
     
+    async function revealInFinder(btn, imageId) {
+      if (btn.disabled) return;
+      btn.disabled = true;
+      const originalText = btn.textContent;
+      btn.textContent = 'Opening…';
+      try {
+        const res = await fetch('/api/reveal-in-finder/' + imageId);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          showToast(data.error || 'Failed to reveal in Finder', 'error');
+        } else {
+          showToast('Revealed in Finder', 'success');
+        }
+      } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    }
+    
     async function disconnectInstagram() {
       if (!confirm('Disconnect Instagram account?')) return;
       
@@ -1330,6 +1358,39 @@ app.delete('/api/image/:id', async (req, res) => {
     await fs.writeFile(galleryPath, JSON.stringify(galleryData, null, 2));
     
     res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// API endpoint to reveal image in Finder (macOS only)
+app.get('/api/reveal-in-finder/:id', async (req, res) => {
+  if (process.platform !== 'darwin') {
+    return res.status(400).json({ error: 'Reveal in Finder is only supported on macOS' });
+  }
+  try {
+    const imageId = parseInt(req.params.id, 10);
+    const galleryPath = path.join(OUTPUT_DIR, 'gallery.json');
+    if (!(await fs.pathExists(galleryPath))) {
+      return res.status(404).json({ error: 'Gallery not found' });
+    }
+    const data = await fs.readFile(galleryPath, 'utf-8');
+    const galleryData = JSON.parse(data);
+    const image = galleryData.images.find(img => img.id === imageId);
+    if (!image) {
+      return res.status(404).json({ error: 'Image not found' });
+    }
+    const imagePath = path.join(OUTPUT_DIR, image.filename);
+    if (!(await fs.pathExists(imagePath))) {
+      return res.status(404).json({ error: 'Image file not found' });
+    }
+    execFile('open', ['-R', imagePath], (err) => {
+      if (err) {
+        console.error('Reveal in Finder error:', err);
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ success: true });
+    });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

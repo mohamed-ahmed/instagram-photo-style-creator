@@ -18,7 +18,8 @@ function parseArgs() {
     hijabFolder: null,
     provider: 'gemini', // default to gemini
     amazon: false,
-    color: null
+    color: null,
+    caption: false
   };
   
   for (let i = 0; i < args.length; i++) {
@@ -33,6 +34,8 @@ function parseArgs() {
     } else if (args[i] === '--color' && args[i + 1]) {
       result.color = args[i + 1];
       i++;
+    } else if (args[i] === '--caption') {
+      result.caption = true;
     } else if (!args[i].startsWith('--')) {
       // First non-flag argument is hijab folder (shorthand)
       result.hijabFolder = args[i];
@@ -55,6 +58,7 @@ const IMAGE_PROVIDER = CLI_ARGS.provider;
 const HIJAB_FOLDER = CLI_ARGS.hijabFolder;
 const AMAZON_MODE = CLI_ARGS.amazon;
 const HIJAB_COLOR = CLI_ARGS.color;
+const GENERATE_CAPTION = CLI_ARGS.caption;
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -174,12 +178,12 @@ function buildPrompt(styleImageCount) {
   
   if (HIJAB_COLOR) {
     // Color-based prompts
-    defaultPrompt = 'Use the ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). Create a professional Instagram portrait matching the style from the reference images, with the model wearing a hijab in ' + HIJAB_COLOR + ' color. Remove hijab wrinkles.';
-    amazonPrompt = 'Use the ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). Create a professional Instagram portrait matching the style from the reference images, with the model wearing only a hijab in ' + HIJAB_COLOR + ' color. Remove hijab wrinkles. Model must not be sitting. Background must be completely white. Outfit must not include black';
+    defaultPrompt = 'Use the ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). Create a Instagram portrait matching the style from the reference images, with the model wearing a hijab in ' + HIJAB_COLOR + ' color. Only the hijab should be ' + HIJAB_COLOR + '; keep the rest of the outfit neutral and not ' + HIJAB_COLOR + '. Remove hijab wrinkles.';
+    amazonPrompt = 'Use the ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). Create a Instagram portrait matching the style from the reference images, with the model wearing only a hijab in ' + HIJAB_COLOR + ' color. Only the hijab should be ' + HIJAB_COLOR + '; keep the rest of the outfit neutral and not ' + HIJAB_COLOR + '. Remove hijab wrinkles. Model must not be sitting. Background must be completely white. Hijab must fit within frame';
   } else {
     // Hijab image-based prompts
-    defaultPrompt = 'Use the first ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing the hijab from the last image. Remove hijab wrinkles.';
-    amazonPrompt = 'Use the first ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a professional Instagram portrait matching the style from the reference images, with the model wearing only the hijab from the last image. Remove hijab wrinkles. Model must not be sitting. Background must be completely white. Outfit must not include black';
+    defaultPrompt = 'Use the first ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a Instagram portrait matching the style from the reference images, with the model wearing the hijab from the last image. Only the hijab should match the hijab image; keep the rest of the outfit neutral and not matching the hijab pattern or color. Remove hijab wrinkles.';
+    amazonPrompt = 'Use the first ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). The last image shows a hijab. Create a Instagram portrait matching the style from the reference images, with the model wearing only the hijab from the last image. Only the hijab should match the hijab image; keep the rest of the outfit neutral and not matching the hijab pattern or color. Remove hijab wrinkles. Model must not be sitting. Background must be completely white. Hijab must fit within frame';
   }
   
   return AMAZON_MODE ? amazonPrompt : defaultPrompt;
@@ -493,6 +497,7 @@ Options:
   --color <color>     Specify hijab color instead of folder (e.g., "black", "lime green")
   --provider <name>   Image provider: gemini (default) or openai
   --amazon            Use Amazon product photo style (white background, standing model)
+  --caption           Generate Instagram caption for the image (default: no caption)
   --help, -h          Show this help message
 
 Examples:
@@ -543,9 +548,6 @@ Examples:
     
     console.log('Selected ' + selectedStyleImages.length + ' style images:', selectedStyleImages);
     
-    // Load existing gallery data
-    const galleryData = await loadGalleryData();
-    
     // Handle color mode vs hijab folder mode
     if (HIJAB_COLOR) {
       // Color mode: generate single image with specified color
@@ -564,12 +566,16 @@ Examples:
         const actualFilename = await saveImage(imageData, tempPath);
         const actualPath = path.join(OUTPUT_DIR, actualFilename);
         
-        // Generate caption for the image
-        const caption = await generateCaption(actualPath, HIJAB_COLOR);
-        console.log('Caption: ' + caption.substring(0, 100) + '...');
+        // Generate caption only if --caption flag is passed
+        let caption = '';
+        if (GENERATE_CAPTION) {
+          caption = await generateCaption(actualPath, HIJAB_COLOR);
+          console.log('Caption: ' + caption.substring(0, 100) + '...');
+        }
         
-        // Add to gallery data
-        galleryData.images.push({
+        // Reload gallery from disk (in case other processes added images) then append
+        const freshGallery = await loadGalleryData();
+        freshGallery.images.push({
           id: timestamp,
           filename: actualFilename,
           hijabStyle: HIJAB_COLOR,
@@ -577,9 +583,7 @@ Examples:
           createdAt: new Date().toISOString(),
           provider: IMAGE_PROVIDER
         });
-        
-        // Save gallery data
-        await saveGalleryData(galleryData);
+        await saveGalleryData(freshGallery);
       } catch (error) {
         console.error('Failed to generate image with color ' + HIJAB_COLOR + ':', error.message);
         throw error;
@@ -608,12 +612,16 @@ Examples:
           const actualFilename = await saveImage(imageData, tempPath);
           const actualPath = path.join(OUTPUT_DIR, actualFilename);
           
-          // Generate caption for the image
-          const caption = await generateCaption(actualPath, hijabImage.name);
-          console.log('Caption: ' + caption.substring(0, 100) + '...');
+          // Generate caption only if --caption flag is passed
+          let caption = '';
+          if (GENERATE_CAPTION) {
+            caption = await generateCaption(actualPath, hijabImage.name);
+            console.log('Caption: ' + caption.substring(0, 100) + '...');
+          }
           
-          // Add to gallery data
-          galleryData.images.push({
+          // Reload gallery from disk (in case other processes added images) then append
+          const freshGallery = await loadGalleryData();
+          freshGallery.images.push({
             id: timestamp,
             filename: actualFilename,
             hijabStyle: hijabImage.name,
@@ -621,9 +629,7 @@ Examples:
             createdAt: new Date().toISOString(),
             provider: IMAGE_PROVIDER
           });
-          
-          // Save gallery data after each image
-          await saveGalleryData(galleryData);
+          await saveGalleryData(freshGallery);
           
           // Add a small delay to avoid rate limiting
           await new Promise(resolve => setTimeout(resolve, 1000));
