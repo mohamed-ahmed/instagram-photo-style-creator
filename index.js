@@ -19,12 +19,22 @@ function parseArgs() {
     provider: 'gemini', // default to gemini
     amazon: false,
     color: null,
-    caption: false
+    caption: false,
+    styleImages: [],
+    prompt: null,
+    model: null
   };
   
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--hijab' && args[i + 1]) {
       result.hijabFolder = args[i + 1];
+      i++;
+    } else if (args[i] === '--style' && args[i + 1]) {
+      result.styleImages.push(args[i + 1]);
+      i++;
+    } else if (args[i] === '--styles' && args[i + 1]) {
+      const parts = args[i + 1].split(',').map(s => s.trim()).filter(Boolean);
+      result.styleImages.push(...parts);
       i++;
     } else if (args[i] === '--provider' && args[i + 1]) {
       result.provider = args[i + 1];
@@ -33,6 +43,12 @@ function parseArgs() {
       result.amazon = true;
     } else if (args[i] === '--color' && args[i + 1]) {
       result.color = args[i + 1];
+      i++;
+    } else if (args[i] === '--prompt' && args[i + 1]) {
+      result.prompt = args[i + 1];
+      i++;
+    } else if (args[i] === '--model' && args[i + 1]) {
+      result.model = args[i + 1];
       i++;
     } else if (args[i] === '--caption') {
       result.caption = true;
@@ -49,6 +65,12 @@ function parseArgs() {
   if (process.env.IMAGE_PROVIDER && !process.argv.includes('--provider')) {
     result.provider = process.env.IMAGE_PROVIDER;
   }
+  if (!result.prompt && process.env.IMAGE_PROMPT) {
+    result.prompt = process.env.IMAGE_PROMPT;
+  }
+  if (!result.model && process.env.IMAGE_MODEL) {
+    result.model = process.env.IMAGE_MODEL;
+  }
   
   return result;
 }
@@ -59,6 +81,9 @@ const HIJAB_FOLDER = CLI_ARGS.hijabFolder;
 const AMAZON_MODE = CLI_ARGS.amazon;
 const HIJAB_COLOR = CLI_ARGS.color;
 const GENERATE_CAPTION = CLI_ARGS.caption;
+const STYLE_IMAGES = CLI_ARGS.styleImages;
+const CUSTOM_PROMPT = CLI_ARGS.prompt;
+const IMAGE_MODEL = CLI_ARGS.model;
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -72,15 +97,18 @@ const STYLE_INPUT_DIR = path.join(__dirname, 'style_input');
 const HIJAB_INPUT_DIR = path.join(__dirname, 'hijab_input');
 const OUTPUT_DIR = path.join(__dirname, 'output_folder');
 
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif'];
+
+function isImageFile(filePath) {
+  return IMAGE_EXTENSIONS.some(ext => filePath.toLowerCase().endsWith(ext));
+}
+
 /**
  * Get all image files from a directory
  */
 async function getImageFiles(dir) {
   const files = await fs.readdir(dir);
-  const imageExtensions = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif'];
-  return files.filter(file => 
-    imageExtensions.some(ext => file.toLowerCase().endsWith(ext))
-  );
+  return files.filter(file => isImageFile(file));
 }
 
 /**
@@ -176,6 +204,10 @@ function getMimeType(filePath) {
 function buildPrompt(styleImageCount) {
   let defaultPrompt, amazonPrompt;
   
+  if (CUSTOM_PROMPT) {
+    return CUSTOM_PROMPT;
+  }
+  
   if (HIJAB_COLOR) {
     // Color-based prompts
     defaultPrompt = 'Use the ' + styleImageCount + ' images as style references (lighting, colors, composition, mood, aesthetic). Create a Instagram portrait matching the style from the reference images, with the model wearing a hijab in ' + HIJAB_COLOR + ' color. Only the hijab should be ' + HIJAB_COLOR + '; keep the rest of the outfit neutral and not ' + HIJAB_COLOR + '. Remove hijab wrinkles.';
@@ -231,7 +263,7 @@ async function generateImageOpenAI(styleImages, hijabImage) {
     }
     
     const response = await openai.images.edit({
-      model: 'gpt-image-1',
+      model: IMAGE_MODEL || 'gpt-image-1',
       prompt: prompt,
       image: imageFiles
     });
@@ -259,7 +291,8 @@ async function generateImageOpenAI(styleImages, hijabImage) {
 async function generateImageGemini(styleImages, hijabImage) {
   const hijabName = hijabImage ? hijabImage.name : HIJAB_COLOR;
   
-  console.log('Generating image with Gemini gemini-3-pro-image-preview: ' + hijabName + '...');
+  const modelName = IMAGE_MODEL || 'gemini-3-pro-image-preview';
+  console.log('Generating image with Gemini ' + modelName + ': ' + hijabName + '...');
   console.log('Using ' + styleImages.length + ' style images as reference');
   
   if (AMAZON_MODE) {
@@ -304,7 +337,7 @@ async function generateImageGemini(styleImages, hijabImage) {
     }
     
     const response = await gemini.models.generateContent({
-      model: 'gemini-3-pro-image-preview',
+      model: modelName,
       contents: [
         {
           role: 'user',
@@ -495,7 +528,11 @@ Usage: node index.js [options] [hijab_folder]
 Options:
   --hijab <folder>     Specify hijab folder (e.g., Tanjiro_Anime_Print)
   --color <color>     Specify hijab color instead of folder (e.g., "black", "lime green")
+  --style <file>      Use a specific style image (repeatable; path or filename in style_input)
+  --styles <list>     Comma-separated list of style images (path or filenames in style_input)
   --provider <name>   Image provider: gemini (default) or openai
+  --model <name>      Override image model name for the selected provider
+  --prompt <text>     Override the generation prompt
   --amazon            Use Amazon product photo style (white background, standing model)
   --caption           Generate Instagram caption for the image (default: no caption)
   --help, -h          Show this help message
@@ -506,6 +543,7 @@ Examples:
   node index.js --provider gemini              # Random hijab folder
   node index.js --color "lime green"           # Generate with lime green hijab
   node index.js --color black --amazon         # Black hijab, Amazon style
+  node index.js --style IMG_001.jpg --prompt "Custom prompt here"
     `);
     process.exit(0);
   }
@@ -522,31 +560,49 @@ Examples:
         throw new Error('GEMINI_API_KEY is not set in environment variables');
       }
       console.log('Starting image generation process...');
-      console.log('Using Google Gemini gemini-3-pro-image-preview model');
+      console.log('Using Google Gemini ' + (IMAGE_MODEL || 'gemini-3-pro-image-preview') + ' model');
     } else {
       if (!process.env.OPENAI_API_KEY) {
         throw new Error('OPENAI_API_KEY is not set in environment variables');
       }
       console.log('Starting image generation process...');
-      console.log('Using OpenAI gpt-image-1 model');
+      console.log('Using OpenAI ' + (IMAGE_MODEL || 'gpt-image-1') + ' model');
     }
     
-    // Get style images
-    const styleImageFiles = await getImageFiles(STYLE_INPUT_DIR);
+    let styleImagePaths = [];
     
-    if (styleImageFiles.length === 0) {
-      throw new Error('No image files found in ' + STYLE_INPUT_DIR);
+    if (STYLE_IMAGES && STYLE_IMAGES.length > 0) {
+      const resolved = [];
+      for (const img of STYLE_IMAGES) {
+        const imgPath = path.isAbsolute(img) ? img : path.join(STYLE_INPUT_DIR, img);
+        if (!(await fs.pathExists(imgPath))) {
+          throw new Error('Style image not found: ' + img);
+        }
+        if (!isImageFile(imgPath)) {
+          throw new Error('Style image is not a supported image type: ' + img);
+        }
+        resolved.push(imgPath);
+      }
+      styleImagePaths = resolved;
+      console.log('Using provided style images:', styleImagePaths.map(p => path.basename(p)));
+    } else {
+      // Get style images
+      const styleImageFiles = await getImageFiles(STYLE_INPUT_DIR);
+      
+      if (styleImageFiles.length === 0) {
+        throw new Error('No image files found in ' + STYLE_INPUT_DIR);
+      }
+      
+      if (styleImageFiles.length < 3) {
+        console.warn('Warning: Only ' + styleImageFiles.length + ' style images found. Using all available images.');
+      }
+      
+      // Select 3 random style images
+      const selectedStyleImages = getRandomItems(styleImageFiles, Math.min(3, styleImageFiles.length));
+      styleImagePaths = selectedStyleImages.map(img => path.join(STYLE_INPUT_DIR, img));
+      
+      console.log('Selected ' + selectedStyleImages.length + ' style images:', selectedStyleImages);
     }
-    
-    if (styleImageFiles.length < 3) {
-      console.warn('Warning: Only ' + styleImageFiles.length + ' style images found. Using all available images.');
-    }
-    
-    // Select 3 random style images
-    const selectedStyleImages = getRandomItems(styleImageFiles, Math.min(3, styleImageFiles.length));
-    const styleImagePaths = selectedStyleImages.map(img => path.join(STYLE_INPUT_DIR, img));
-    
-    console.log('Selected ' + selectedStyleImages.length + ' style images:', selectedStyleImages);
     
     // Handle color mode vs hijab folder mode
     if (HIJAB_COLOR) {

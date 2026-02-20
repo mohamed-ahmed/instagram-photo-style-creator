@@ -15,7 +15,59 @@ app.use(express.json());
 
 const PORT = process.env.DASHBOARD_PORT || 3000;
 const OUTPUT_DIR = path.join(__dirname, 'output_folder');
+const STYLE_INPUT_DIR = path.join(__dirname, 'style_input');
+const HIJAB_INPUT_DIR = path.join(__dirname, 'hijab_input');
 const TOKENS_FILE = path.join(__dirname, '.instagram-tokens.json');
+const PROMPT_HISTORY_FILE = path.join(OUTPUT_DIR, 'prompt_history.json');
+
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.webp', '.gif', '.heic', '.heif'];
+
+function isImageFile(filePath) {
+  return IMAGE_EXTENSIONS.some(ext => filePath.toLowerCase().endsWith(ext));
+}
+
+async function getImageFiles(dir) {
+  try {
+    const files = await fs.readdir(dir);
+    return files.filter(file => isImageFile(file));
+  } catch {
+    return [];
+  }
+}
+
+async function getHijabFolders(dir) {
+  try {
+    const entries = await fs.readdir(dir);
+    const folders = [];
+    for (const entry of entries) {
+      if (entry.startsWith('.')) continue;
+      const fullPath = path.join(dir, entry);
+      const stat = await fs.stat(fullPath);
+      if (stat.isDirectory()) folders.push(entry);
+    }
+    return folders;
+  } catch {
+    return [];
+  }
+}
+
+async function loadPromptHistory() {
+  try {
+    if (await fs.pathExists(PROMPT_HISTORY_FILE)) {
+      const data = await fs.readFile(PROMPT_HISTORY_FILE, 'utf-8');
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch {
+    // ignore
+  }
+  return [];
+}
+
+async function savePromptHistory(prompts) {
+  await fs.ensureDir(OUTPUT_DIR);
+  await fs.writeFile(PROMPT_HISTORY_FILE, JSON.stringify(prompts, null, 2));
+}
 
 // Facebook App credentials (needed for OAuth)
 const FB_APP_ID = process.env.FB_APP_ID;
@@ -179,6 +231,7 @@ app.post('/api/refresh-token', async (req, res) => {
 
 // Serve static files from output folder
 app.use('/images', express.static(OUTPUT_DIR));
+app.use('/style-input', express.static(STYLE_INPUT_DIR));
 
 /**
  * Instagram OAuth - Step 1: Redirect to Facebook Login
@@ -366,14 +419,33 @@ async function postToInstagram(imageUrl, caption) {
   
   console.log('Posting to Instagram:', imageUrl);
   
+  // Verify URL is publicly reachable and looks like an image
+  try {
+    const headRes = await fetch(imageUrl, { method: 'HEAD' });
+    const contentType = headRes.headers.get('content-type') || '';
+    const statusLine = headRes.status + ' ' + (headRes.statusText || '');
+    if (!headRes.ok) {
+      const hint = headRes.status === 404
+        ? 'Check PUBLIC_URL, ngrok tunnel, and filename.'
+        : 'Check that the URL is publicly reachable.';
+      throw new Error('Image URL not accessible (HTTP ' + statusLine.trim() + '). ' + hint + ' URL: ' + imageUrl);
+    }
+    if (!contentType.startsWith('image/')) {
+      throw new Error('Image URL did not return an image content-type. Got "' + contentType + '". URL: ' + imageUrl);
+    }
+  } catch (error) {
+    throw new Error('Image URL validation failed: ' + error.message);
+  }
+  
   // Step 1: Create media container
   const createMediaUrl = `https://graph.facebook.com/v18.0/${creds.userId}/media`;
   const createResponse = await fetch(createMediaUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
       image_url: imageUrl,
-      caption: caption,
+      caption: caption || '',
+      media_type: 'IMAGE',
       access_token: creds.accessToken
     })
   });
@@ -425,8 +497,8 @@ async function postToInstagram(imageUrl, caption) {
   const publishUrl = `https://graph.facebook.com/v18.0/${creds.userId}/media_publish`;
   const publishResponse = await fetch(publishUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
       creation_id: creationId,
       access_token: creds.accessToken
     })
@@ -522,6 +594,9 @@ app.get('/', async (req, res) => {
     
     // Get unique hijab styles for filter
     const uniqueStyles = [...new Set(galleryData.images.map(img => img.hijabStyle))].sort();
+    
+    const styleImages = (await getImageFiles(STYLE_INPUT_DIR)).sort();
+    const hijabFolders = (await getHijabFolders(HIJAB_INPUT_DIR)).sort();
     
     const creds = getInstagramCreds();
     const instagramConnected = !!(creds.accessToken && creds.userId);
@@ -641,6 +716,143 @@ app.get('/', async (req, res) => {
     .stat { text-align: center; }
     .stat-value { font-family: 'Cormorant Garamond', serif; font-size: 2.5rem; color: var(--accent); }
     .stat-label { font-size: 0.7rem; letter-spacing: 0.2em; text-transform: uppercase; color: var(--text-secondary); }
+
+    .generate-panel {
+      max-width: 1400px;
+      margin: 2rem auto 1rem;
+      padding: 2rem;
+      background: var(--bg-secondary);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+    .generate-header h2 {
+      font-family: 'Cormorant Garamond', serif;
+      color: var(--accent);
+      font-size: 2rem;
+      margin-bottom: 0.25rem;
+    }
+    .generate-header p {
+      color: var(--text-secondary);
+      font-size: 0.85rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .generate-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 1rem;
+      margin-top: 1.5rem;
+    }
+    .field label {
+      display: block;
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      margin-bottom: 0.5rem;
+    }
+    .field input,
+    .field select,
+    .field textarea {
+      width: 100%;
+      padding: 0.7rem 0.8rem;
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text-primary);
+      font-size: 0.85rem;
+      font-family: 'Montserrat', sans-serif;
+    }
+    .field small {
+      display: block;
+      margin-top: 0.4rem;
+      color: var(--text-secondary);
+      font-size: 0.7rem;
+    }
+    .field-wide {
+      grid-column: 1 / -1;
+    }
+    .style-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+      gap: 0.8rem;
+    }
+    .style-item {
+      display: grid;
+      gap: 0.5rem;
+      padding: 0.6rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--bg-primary);
+      cursor: pointer;
+      transition: border-color 0.2s ease, transform 0.2s ease;
+    }
+    .style-item:hover {
+      border-color: var(--accent);
+      transform: translateY(-2px);
+    }
+    .style-item input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+    .style-item img {
+      width: 100%;
+      aspect-ratio: 1;
+      object-fit: cover;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
+    .style-item span {
+      font-size: 0.65rem;
+      color: var(--text-secondary);
+      word-break: break-all;
+    }
+    .style-item.selected {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px var(--accent);
+    }
+    .prompt-history {
+      margin-top: 0.8rem;
+      display: grid;
+      gap: 0.5rem;
+    }
+    .prompt-history button {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      padding: 0.5rem 0.7rem;
+      border-radius: 6px;
+      font-size: 0.7rem;
+      text-align: left;
+      cursor: pointer;
+    }
+    .prompt-history button:hover {
+      border-color: var(--accent);
+      color: var(--text-primary);
+    }
+    .checkbox {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      font-size: 0.8rem;
+      color: var(--text-primary);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+    }
+    .btn-generate {
+      margin-top: 1.5rem;
+      background: var(--accent);
+      color: var(--bg-primary);
+      padding: 0.8rem 1.4rem;
+      font-size: 0.75rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      border-radius: 6px;
+      border: none;
+      cursor: pointer;
+    }
+    .btn-generate:hover { background: var(--accent-hover); }
     
     .gallery {
       max-width: 1400px;
@@ -660,6 +872,30 @@ app.get('/', async (req, res) => {
     }
     
     .card:hover { transform: translateY(-4px); box-shadow: 0 20px 40px rgba(0,0,0,0.4); }
+    
+    .card.loading {
+      border-style: dashed;
+      opacity: 0.85;
+    }
+    .loading-body {
+      padding: 2rem 1.5rem;
+      text-align: center;
+    }
+    .spinner {
+      width: 44px;
+      height: 44px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      margin: 0 auto 1rem;
+      animation: spin 1s linear infinite;
+    }
+    .loading-text {
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
     
     .card-image-wrapper { position: relative; }
     .card-image { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
@@ -822,6 +1058,11 @@ app.get('/', async (req, res) => {
       to { transform: translateX(0); opacity: 1; }
     }
     
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    
     .setup-info {
       background: var(--bg-card);
       border: 1px solid var(--border);
@@ -884,6 +1125,74 @@ app.get('/', async (req, res) => {
       </div>
     </div>
   </header>
+
+  <section class="generate-panel">
+    <div class="generate-header">
+      <h2>Generate New Images</h2>
+      <p>Pick style input image(s), an optional prompt override, and the model to use.</p>
+    </div>
+    <div class="generate-grid">
+      <div class="field">
+        <label for="gen-hijab">Hijab Folder</label>
+        <select id="gen-hijab">
+          <option value="">Select hijab</option>
+          <option value="__random__">Random</option>
+          ${hijabFolders.map(folder => `<option value="${escapeHtml(folder)}">${escapeHtml(folder.replace(/_/g, ' '))}</option>`).join('')}
+        </select>
+      </div>
+      <div class="field">
+        <label for="gen-color">Or Hijab Color</label>
+        <input id="gen-color" type="text" placeholder="e.g. black, sky blue">
+        <small>If set, the hijab folder is ignored.</small>
+      </div>
+      <div class="field field-wide">
+        <label>Style Input Image(s)</label>
+        <div id="style-grid" class="style-grid">
+          ${styleImages.map(img => `
+            <label class="style-item" data-value="${escapeHtml(img)}">
+              <input type="checkbox" value="${escapeHtml(img)}">
+              <img src="/style-input/${encodeURIComponent(img)}" alt="${escapeHtml(img)}">
+              <span>${escapeHtml(img)}</span>
+            </label>
+          `).join('')}
+        </div>
+        <small>Select up to 3 images. Leave blank for random.</small>
+      </div>
+      <div class="field">
+        <label for="gen-provider">Provider</label>
+        <select id="gen-provider">
+          <option value="gemini">gemini</option>
+          <option value="openai">openai</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="gen-model">Model (optional)</label>
+        <input id="gen-model" type="text" placeholder="gemini-3-pro-image-preview">
+      </div>
+      <div class="field field-wide">
+        <label for="gen-prompt">Custom Prompt (optional)</label>
+        <textarea id="gen-prompt" rows="4" placeholder="Override the default prompt..."></textarea>
+        <div id="prompt-history" class="prompt-history"></div>
+      </div>
+      <div class="field">
+        <label for="gen-count">Count</label>
+        <input id="gen-count" type="number" min="1" max="10" value="1">
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input id="gen-amazon" type="checkbox">
+          Amazon Mode
+        </label>
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input id="gen-caption" type="checkbox">
+          Generate Caption
+        </label>
+      </div>
+    </div>
+    <button class="btn btn-generate" onclick="generateImages()">Generate</button>
+  </section>
   
   ${!instagramConnected && (!FB_APP_ID || !FB_APP_SECRET) ? `
   <div class="setup-info">
@@ -990,6 +1299,149 @@ app.get('/', async (req, res) => {
   </div>
 
   <script>
+    function getSelectedStyleImages() {
+      const checked = document.querySelectorAll('#style-grid input[type="checkbox"]:checked');
+      return Array.from(checked).map(i => i.value).filter(Boolean);
+    }
+    
+    function defaultModelForProvider(provider) {
+      return provider === 'openai' ? 'gpt-image-1' : 'gemini-3-pro-image-preview';
+    }
+    
+    function renderPromptHistory(prompts) {
+      const container = document.getElementById('prompt-history');
+      if (!container) return;
+      container.innerHTML = '';
+      if (!prompts || prompts.length === 0) {
+        return;
+      }
+      prompts.forEach((p) => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.textContent = p.length > 120 ? p.slice(0, 117) + '...' : p;
+        btn.title = p;
+        btn.addEventListener('click', () => {
+          const textarea = document.getElementById('gen-prompt');
+          if (textarea) textarea.value = p;
+        });
+        container.appendChild(btn);
+      });
+    }
+    
+    async function fetchPromptHistory() {
+      try {
+        const res = await fetch('/api/prompt-history');
+        const data = await res.json();
+        if (Array.isArray(data.prompts)) {
+          renderPromptHistory(data.prompts);
+        }
+      } catch {
+        // ignore
+      }
+    }
+    
+    async function generateImages() {
+      const hijabFolder = document.getElementById('gen-hijab').value.trim();
+      const color = document.getElementById('gen-color').value.trim();
+      const provider = document.getElementById('gen-provider').value;
+      const model = document.getElementById('gen-model').value.trim();
+      const prompt = document.getElementById('gen-prompt').value.trim();
+      const styleImages = getSelectedStyleImages();
+      const amazon = document.getElementById('gen-amazon').checked;
+      const caption = document.getElementById('gen-caption').checked;
+      const count = parseInt(document.getElementById('gen-count').value, 10) || 1;
+      
+      if (!color && !hijabFolder) {
+        showToast('Select a hijab or choose Random, or enter a color', 'error');
+        return;
+      }
+      if (styleImages.length > 3) {
+        showToast('Select up to 3 style images', 'error');
+        return;
+      }
+      
+      const grid = document.querySelector('.gallery');
+      const placeholders = [];
+      if (grid) {
+        for (let i = 0; i < Math.max(1, count); i++) {
+          const card = document.createElement('div');
+          card.className = 'card loading';
+          card.innerHTML =
+            '<div class="card-image-wrapper">' +
+            '  <div class="loading-body">' +
+            '    <div class="spinner"></div>' +
+            '    <div class="loading-text">Generating</div>' +
+            '  </div>' +
+            '</div>';
+          grid.prepend(card);
+          placeholders.push(card);
+        }
+      }
+      
+      try {
+        const response = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            hijabFolder,
+            color,
+            provider,
+            model,
+            prompt,
+            styleImages,
+            amazon,
+            caption,
+            count
+          })
+        });
+        
+        const data = await response.json();
+        if (data.error) throw new Error(data.error);
+        
+        if (prompt) {
+          fetchPromptHistory();
+        }
+        showToast('Generation started. Refreshing gallery...', 'success');
+        setTimeout(() => location.reload(), 1500);
+      } catch (error) {
+        placeholders.forEach(p => p.remove());
+        showToast('Error: ' + error.message, 'error');
+      }
+    }
+    
+    document.addEventListener('DOMContentLoaded', () => {
+      const providerSelect = document.getElementById('gen-provider');
+      const modelInput = document.getElementById('gen-model');
+      if (providerSelect && modelInput && !modelInput.value) {
+        modelInput.placeholder = defaultModelForProvider(providerSelect.value);
+        providerSelect.addEventListener('change', () => {
+          if (!modelInput.value) {
+            modelInput.placeholder = defaultModelForProvider(providerSelect.value);
+          }
+        });
+      }
+      
+      const styleGrid = document.getElementById('style-grid');
+      if (styleGrid) {
+        styleGrid.addEventListener('change', (e) => {
+          const input = e.target;
+          if (!(input instanceof HTMLInputElement)) return;
+          const item = input.closest('.style-item');
+          if (item) {
+            item.classList.toggle('selected', input.checked);
+          }
+          const selected = styleGrid.querySelectorAll('input[type="checkbox"]:checked');
+          if (selected.length > 3) {
+            input.checked = false;
+            if (item) item.classList.remove('selected');
+            showToast('Select up to 3 style images', 'error');
+          }
+        });
+      }
+      
+      fetchPromptHistory();
+    });
+    
     function toggleShowAll() {
       const showAllCheckbox = document.getElementById('filter-show-all');
       const styleFilters = document.querySelectorAll('.style-filter');
@@ -1264,6 +1716,90 @@ app.get('/', async (req, res) => {
     res.send(html);
   } catch (error) {
     res.status(500).send('Error loading gallery: ' + error.message);
+  }
+});
+
+function runGenerator(args) {
+  return new Promise((resolve, reject) => {
+    execFile('node', [path.join(__dirname, 'index.js'), ...args], { maxBuffer: 1024 * 1024 * 10 }, (err, stdout, stderr) => {
+      if (err) {
+        return reject(new Error(stderr || err.message));
+      }
+      resolve({ stdout, stderr });
+    });
+  });
+}
+
+app.post('/api/generate', async (req, res) => {
+  try {
+    const {
+      hijabFolder,
+      color,
+      provider,
+      model,
+      prompt,
+      styleImages,
+      amazon,
+      caption,
+      count
+    } = req.body || {};
+    
+    const runCount = Math.min(Math.max(parseInt(count, 10) || 1, 1), 10);
+    
+    if (!color && !hijabFolder) {
+      return res.status(400).json({ error: 'Select a hijab, choose Random, or provide a color' });
+    }
+    
+    const args = [];
+    if (color) {
+      args.push('--color', color);
+    } else if (hijabFolder && hijabFolder !== '__random__') {
+      args.push('--hijab', hijabFolder);
+    }
+    if (provider) {
+      args.push('--provider', provider);
+    }
+    if (amazon) {
+      args.push('--amazon');
+    }
+    if (caption) {
+      args.push('--caption');
+    }
+    if (model) {
+      args.push('--model', model);
+    }
+    if (prompt) {
+      args.push('--prompt', prompt);
+    }
+    if (Array.isArray(styleImages)) {
+      for (const img of styleImages) {
+        args.push('--style', img);
+      }
+    }
+
+    if (prompt && prompt.trim()) {
+      const history = await loadPromptHistory();
+      const normalized = prompt.trim();
+      const next = [normalized, ...history.filter(p => p !== normalized)].slice(0, 10);
+      await savePromptHistory(next);
+    }
+    
+    for (let i = 0; i < runCount; i++) {
+      await runGenerator(args);
+    }
+    
+    res.json({ success: true, runs: runCount });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('/api/prompt-history', async (req, res) => {
+  try {
+    const prompts = await loadPromptHistory();
+    res.json({ prompts });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
