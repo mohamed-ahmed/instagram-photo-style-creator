@@ -610,6 +610,7 @@ Examples:
       console.log('Using hijab color mode: ' + HIJAB_COLOR);
       
       try {
+        const effectivePrompt = buildPrompt(styleImagePaths.length);
         const imageData = await generateImage(styleImagePaths, null);
         
         // Create output filename
@@ -636,6 +637,7 @@ Examples:
           filename: actualFilename,
           hijabStyle: HIJAB_COLOR,
           caption: caption,
+          prompt: effectivePrompt,
           createdAt: new Date().toISOString(),
           provider: IMAGE_PROVIDER
         });
@@ -655,6 +657,7 @@ Examples:
       console.log('Found ' + hijabImages.length + ' hijab images');
       
       // Generate images for each hijab style
+      const effectivePrompt = buildPrompt(styleImagePaths.length);
       for (const hijabImage of hijabImages) {
         try {
           const imageData = await generateImage(styleImagePaths, hijabImage);
@@ -682,6 +685,7 @@ Examples:
             filename: actualFilename,
             hijabStyle: hijabImage.name,
             caption: caption,
+            prompt: effectivePrompt,
             createdAt: new Date().toISOString(),
             provider: IMAGE_PROVIDER
           });

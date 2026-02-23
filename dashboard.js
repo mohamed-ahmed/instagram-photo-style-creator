@@ -931,6 +931,34 @@ app.get('/', async (req, res) => {
     .btn-save-caption { border-color: var(--success); color: var(--success); }
     .btn-save-caption:hover { background: var(--success); color: white; }
     
+    .prompt-row {
+      display: flex;
+      gap: 0.5rem;
+      margin-bottom: 0.6rem;
+    }
+    .btn-prompt {
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      padding: 0.35rem 0.6rem;
+      font-size: 0.75rem;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    .btn-prompt:hover { border-color: var(--accent); color: var(--text-primary); }
+    .prompt-text {
+      display: none;
+      background: var(--bg-primary);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.7rem;
+      font-size: 0.8rem;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      margin-bottom: 1rem;
+      white-space: pre-wrap;
+    }
+    
     .card-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
     
     .btn {
@@ -1220,6 +1248,10 @@ app.get('/', async (req, res) => {
         <input type="checkbox" id="filter-show-all" checked onchange="toggleShowAll()">
         <label for="filter-show-all">Show All</label>
       </div>
+      <div class="filter-checkbox">
+        <input type="checkbox" id="filter-liked-only" onchange="updateFilters()">
+        <label for="filter-liked-only">Liked Only</label>
+      </div>
       ${uniqueStyles.map(style => `
         <div class="filter-checkbox">
           <input type="checkbox" id="filter-${style.replace(/[^a-zA-Z0-9]/g, '-')}" class="style-filter" value="${escapeHtml(style)}" checked onchange="updateFilters()">
@@ -1238,7 +1270,7 @@ app.get('/', async (req, res) => {
         <p style="margin-top: 1rem;"><code>IMAGE_PROVIDER=gemini npm start</code></p>
       </div>
     ` : galleryData.images.map(img => `
-      <div class="card" data-id="${img.id}" data-hijab-style="${escapeHtml(img.hijabStyle)}">
+      <div class="card" data-id="${img.id}" data-hijab-style="${escapeHtml(img.hijabStyle)}" data-favorited="${img.favorited ? 'true' : 'false'}">
         <div class="card-image-wrapper">
           <img class="card-image" src="/images/${img.filename}" alt="${img.hijabStyle} hijab style" loading="lazy">
           <div class="card-overlay">
@@ -1265,6 +1297,13 @@ app.get('/', async (req, res) => {
             <button class="btn-edit-caption" onclick="toggleEditCaption(${img.id})">✏️ Edit</button>
             <button class="btn-save-caption" id="save-btn-${img.id}" onclick="saveCaption(${img.id})" style="display:none;">💾 Save</button>
           </div>
+          ${img.prompt ? `
+          <div class="prompt-row">
+            <button class="btn-prompt" onclick="togglePrompt(${img.id})" title="Show prompt">🧾</button>
+            <button class="btn-prompt" onclick="applyPrompt(\`${escapeForJs(img.prompt)}\`)" title="Apply prompt">↩︎</button>
+          </div>
+          <div class="prompt-text" id="prompt-${img.id}">${escapeHtml(img.prompt)}</div>
+          ` : ''}
           <div class="card-actions">
             <button class="btn btn-copy" onclick="copyCaption(this, \`${escapeForJs(img.caption)}\`)">
               Copy Caption
@@ -1340,6 +1379,47 @@ app.get('/', async (req, res) => {
       }
     }
     
+    function saveGenerationPrefs(prefs) {
+      try {
+        localStorage.setItem('genPrefs', JSON.stringify(prefs));
+      } catch {
+        // ignore
+      }
+    }
+    
+    function loadGenerationPrefs() {
+      try {
+        const raw = localStorage.getItem('genPrefs');
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    }
+    
+    function applyGenerationPrefs(prefs) {
+      if (!prefs) return;
+      const hijabSelect = document.getElementById('gen-hijab');
+      const colorInput = document.getElementById('gen-color');
+      const amazonInput = document.getElementById('gen-amazon');
+      const captionInput = document.getElementById('gen-caption');
+      const promptInput = document.getElementById('gen-prompt');
+      if (hijabSelect && prefs.hijabFolder !== undefined) {
+        hijabSelect.value = prefs.hijabFolder;
+      }
+      if (colorInput && prefs.color !== undefined) {
+        colorInput.value = prefs.color;
+      }
+      if (amazonInput && prefs.amazon !== undefined) {
+        amazonInput.checked = !!prefs.amazon;
+      }
+      if (captionInput && prefs.caption !== undefined) {
+        captionInput.checked = !!prefs.caption;
+      }
+      if (promptInput && prefs.prompt !== undefined) {
+        promptInput.value = prefs.prompt;
+      }
+    }
+    
     async function generateImages() {
       const hijabFolder = document.getElementById('gen-hijab').value.trim();
       const color = document.getElementById('gen-color').value.trim();
@@ -1359,6 +1439,14 @@ app.get('/', async (req, res) => {
         showToast('Select up to 3 style images', 'error');
         return;
       }
+      
+      saveGenerationPrefs({
+        hijabFolder,
+        color,
+        prompt,
+        amazon,
+        caption
+      });
       
       const grid = document.querySelector('.gallery');
       const placeholders = [];
@@ -1439,6 +1527,7 @@ app.get('/', async (req, res) => {
         });
       }
       
+      applyGenerationPrefs(loadGenerationPrefs());
       fetchPromptHistory();
     });
     
@@ -1456,6 +1545,8 @@ app.get('/', async (req, res) => {
     function updateFilters() {
       const showAllCheckbox = document.getElementById('filter-show-all');
       if (!showAllCheckbox) return; // Filters section might not exist if no images
+      const likedOnlyCheckbox = document.getElementById('filter-liked-only');
+      const likedOnly = likedOnlyCheckbox ? likedOnlyCheckbox.checked : false;
       
       const styleFilters = document.querySelectorAll('.style-filter');
       const selectedStyles = Array.from(styleFilters)
@@ -1472,7 +1563,11 @@ app.get('/', async (req, res) => {
       let visibleCount = 0;
       cards.forEach(card => {
         const cardStyle = card.getAttribute('data-hijab-style');
-        if (selectedStyles.length === 0 || selectedStyles.includes(cardStyle)) {
+        const isFavorited = card.getAttribute('data-favorited') === 'true';
+        const styleMatch = selectedStyles.length === 0 || selectedStyles.includes(cardStyle);
+        const likedMatch = !likedOnly || isFavorited;
+        
+        if (styleMatch && likedMatch) {
           card.style.display = '';
           visibleCount++;
         } else {
@@ -1542,6 +1637,20 @@ app.get('/', async (req, res) => {
       }
     }
     
+    function togglePrompt(imageId) {
+      const el = document.getElementById('prompt-' + imageId);
+      if (!el) return;
+      el.style.display = el.style.display === 'none' || !el.style.display ? 'block' : 'none';
+    }
+    
+    function applyPrompt(prompt) {
+      const textarea = document.getElementById('gen-prompt');
+      if (textarea) {
+        textarea.value = prompt || '';
+        textarea.focus();
+      }
+    }
+    
     async function saveCaption(imageId) {
       const captionEdit = document.getElementById('caption-edit-' + imageId);
       const caption = captionEdit.value.trim();
@@ -1585,6 +1694,7 @@ app.get('/', async (req, res) => {
         
         // Update badge
         const card = btn.closest('.card');
+        card.setAttribute('data-favorited', data.favorited ? 'true' : 'false');
         const badges = card.querySelector('.badges');
         const favBadge = badges.querySelector('.fav-badge');
         
@@ -1593,6 +1703,8 @@ app.get('/', async (req, res) => {
         } else if (!data.favorited && favBadge) {
           favBadge.remove();
         }
+        
+        updateFilters();
         
         showToast(data.favorited ? 'Added to favorites!' : 'Removed from favorites');
       } catch (error) {
